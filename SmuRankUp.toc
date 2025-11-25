@@ -1,0 +1,8 @@
+## Interface: 11504
+## Title: SmuRankUp
+## Version: 1.0.0
+## Author: You
+## Description: Automatically upgrade outdated spell ranks on your hotbar
+## Notes: Replaces low-ranked spells with higher-ranked versions when learned
+
+SmuRankUp.lua

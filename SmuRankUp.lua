@@ -7,10 +7,10 @@ local DEBUG = false
 -- Get the character's spell book and track learned spells
 local SmuRankUp = CreateFrame("Frame")
 SmuRankUp:RegisterEvent("PLAYER_LOGIN")
-SmuRankUp:RegisterEvent("SPELLS_CHANGED")
-SmuRankUp:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+SmuRankUp:RegisterEvent("LEARNED_SPELL_IN_TAB")
 
 -- Cache: base spell name -> list of { spellID, spellName, rank }
+local knownSpells = {}
 
 -- Debug output
 local function SRU_Debug(message)
@@ -150,6 +150,13 @@ local function ShowRankUpUI(outdatedSpells)
         if child ~= frame.border and child ~= frame.headline then child:Hide() end
     end
 
+    -- Also hide previously created FontStrings/regions to avoid overlap
+    for _, region in ipairs({frame:GetRegions()}) do
+        if region ~= frame.headline and region ~= frame.bg then
+            region:Hide()
+        end
+    end
+
     -- Add skill-style close button at bottom right
     if not frame.closeButton then
         frame.closeButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
@@ -208,8 +215,8 @@ local function ShowRankUpUI(outdatedSpells)
     frame:SetHeight(math.abs(yOffset) + 60)
 end
 
--- Scan hotbar and replace outdated spells
-local function ScanAndUpgradeHotbar()
+local function ScanAndUpgradeHotbar(shouldShowUI)
+    if shouldShowUI == nil then shouldShowUI = true end
     SRU_Debug("Checking hotbar for outdated spell ranks...")
     outdatedSpells = {}
     for slot = 1, 120 do
@@ -239,7 +246,9 @@ local function ScanAndUpgradeHotbar()
         end
     end
     if #outdatedSpells > 0 then
-        ShowRankUpUI(outdatedSpells)
+        if shouldShowUI then
+            ShowRankUpUI(outdatedSpells)
+        end
     else
         if SmuRankUpFrame then SmuRankUpFrame:Hide() end
         if DEBUG then SRU_Debug("No outdated spells found on hotbar.") end
@@ -247,22 +256,20 @@ local function ScanAndUpgradeHotbar()
 end
 
 -- Main handler
-local function CheckAndUpgradeSpells()
+local function CheckAndUpgradeSpells(shouldShowUI)
+    if shouldShowUI == nil then shouldShowUI = true end
 	ScanSpellBook()
-	ScanAndUpgradeHotbar()
+	ScanAndUpgradeHotbar(shouldShowUI)
 end
 
 -- Event handler
 SmuRankUp:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         SRU_Debug("Player logged in. Checking for outdated spells...")
-        CheckAndUpgradeSpells()
-    elseif event == "SPELLS_CHANGED" then
-        SRU_Debug("Spell book changed. Updating hotbar...")
-        CheckAndUpgradeSpells()
-    elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
-        SRU_Debug("Specialization changed. Rechecking spells...")
-        CheckAndUpgradeSpells()
+        CheckAndUpgradeSpells(false)
+    elseif event == "LEARNED_SPELL_IN_TAB" then
+        SRU_Debug("Learned new spell. Checking for outdated spells...")
+        CheckAndUpgradeSpells(true)
     end
 end)
 
@@ -283,7 +290,7 @@ local function SmuRankUp_SlashHandler(msg)
         print("  GetSpellSubtext(" .. spellID .. "): " .. tostring(rankText))
     else
         print("|cFF00FF00[" .. ADDON_NAME .. "]|r Checking spells...")
-        CheckAndUpgradeSpells()
+        CheckAndUpgradeSpells(true)
     end
 end
 

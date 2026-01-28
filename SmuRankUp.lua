@@ -7,10 +7,65 @@ local DEBUG = false
 -- Get the character's spell book and track learned spells
 local SmuRankUp = CreateFrame("Frame")
 SmuRankUp:RegisterEvent("PLAYER_LOGIN")
-SmuRankUp:RegisterEvent("LEARNED_SPELL_IN_TAB")
+SmuRankUp:RegisterEvent("SPELLS_CHANGED")
 
 -- Cache: base spell name -> list of { spellID, spellName, rank }
 local knownSpells = {}
+local lastSpellSignature
+local ignoredRanks -- saved variable cache
+local playerReady = false
+local spellIdToInfo = {}
+
+local function ExtractSpellIDFromLink(link)
+    if not link then return nil end
+    local id = link:match("Hspell:(%d+):")
+    return id and tonumber(id) or nil
+end
+
+local function GetSpellDataFromBookSlot(spellIndex)
+    if not spellIndex then return nil end
+    local spellName, subSpellName = GetSpellBookItemName(spellIndex, BOOKTYPE_SPELL)
+    if not spellName then return nil end
+    local spellType, fallbackSpellID = GetSpellBookItemInfo(spellIndex, BOOKTYPE_SPELL)
+    if spellType ~= "SPELL" then return nil end
+    local spellLink = GetSpellLink(spellIndex, BOOKTYPE_SPELL)
+    local spellID = ExtractSpellIDFromLink(spellLink) or fallbackSpellID
+    return spellName, subSpellName, spellID
+end
+
+local function BuildSpellSignature()
+    local keys = {}
+    for baseName in pairs(knownSpells) do
+        table.insert(keys, baseName)
+    end
+    table.sort(keys)
+    local parts = {}
+    for _, baseName in ipairs(keys) do
+        local ranks = knownSpells[baseName]
+        local highestRank = (ranks and ranks[#ranks] and ranks[#ranks].rank) or 0
+        table.insert(parts, baseName .. ":" .. tostring(highestRank))
+    end
+    return table.concat(parts, "|")
+end
+
+local function EnsureIgnoredRanks()
+    SmuRankUpIgnoredRanks = SmuRankUpIgnoredRanks or {}
+    ignoredRanks = SmuRankUpIgnoredRanks
+end
+
+local function IsUpgradeIgnored(baseName, upgradeRank)
+    if not ignoredRanks then return false end
+    local highestIgnored = ignoredRanks[baseName]
+    return highestIgnored and upgradeRank <= highestIgnored
+end
+
+local function IgnoreUpgrade(baseName, upgradeRank)
+    EnsureIgnoredRanks()
+    local current = ignoredRanks[baseName]
+    if not current or upgradeRank > current then
+        ignoredRanks[baseName] = upgradeRank
+    end
+end
 
 -- Debug output
 local function SRU_Debug(message)
@@ -41,6 +96,42 @@ local function ExtractRank(rankText)
 	return rank
 end
 
+local function GetActionSpellDetails(slot)
+    local actionType, actionID = GetActionInfo(slot)
+    if actionType ~= "spell" or not actionID then return nil end
+
+    local spellName
+    local baseName
+    local currentRank
+
+    local cached = spellIdToInfo[actionID]
+    if cached then
+        spellName = cached.spellName
+        baseName = cached.baseName
+        currentRank = cached.rank
+    else
+        spellName = select(1, GetSpellInfo(actionID))
+        baseName = GetBaseSpellName(spellName)
+    end
+
+    if not currentRank then
+        local rankText = GetSpellSubtext(actionID)
+        if not rankText then
+            _, rankText = GetSpellInfo(actionID)
+        end
+        currentRank = ExtractRank(rankText)
+    end
+
+    if spellName then
+        return {
+            spellName = spellName,
+            baseName = baseName,
+            currentRank = currentRank,
+            spellID = actionID
+        }
+    end
+end
+
 -- Utility: Extracts rank from subtext or name
 local function SRU_GetRank(spellID)
     local subtext = GetSpellSubtext(spellID)
@@ -59,21 +150,22 @@ end
 local function ScanSpellBook()
     SRU_Debug("Scanning spell book...")
     knownSpells = {}
+    spellIdToInfo = {}
     local tabIndex = 1
     while true do
         local tabName, _, offset, numSpells = GetSpellTabInfo(tabIndex)
         if not tabName then break end
         for i = 1, numSpells do
             local spellIndex = offset + i
-            local spellName = GetSpellBookItemName(spellIndex, BOOKTYPE_SPELL)
-            if spellName then
-                local _, _, _, _, _, _, spellID = GetSpellInfo(spellName)
-                local rankText = GetSpellSubtext(spellIndex)
-                local rank = ExtractRank(rankText)
+            local spellName, subSpellName, spellID = GetSpellDataFromBookSlot(spellIndex)
+            if spellName and spellID then
+                local rank = ExtractRank(subSpellName)
                 local baseName = GetBaseSpellName(spellName)
-                if baseName and spellID then
+                if baseName then
                     if not knownSpells[baseName] then knownSpells[baseName] = {} end
-                    table.insert(knownSpells[baseName], { spellID = spellID, spellName = spellName, rank = rank })
+                    local entry = { spellID = spellID, spellName = spellName, rank = rank }
+                    table.insert(knownSpells[baseName], entry)
+                    spellIdToInfo[spellID] = { spellName = spellName, baseName = baseName, rank = rank }
                     SRU_Debug("Found: [" .. spellIndex .. "] " .. spellName .. " (ID: " .. tostring(spellID) .. ", Rank: " .. rank .. ")")
                 end
             end
@@ -91,25 +183,18 @@ local function ScanSpellBook()
             SRU_Debug("Lesser Heal rank found: " .. tostring(v.rank) .. ", ID: " .. tostring(v.spellID) .. ", Name: " .. tostring(v.spellName))
         end
     end
+    return BuildSpellSignature()
 end
 
 -- Find the highest known rank spell ID by checking sequentially
 local function FindHighestKnownRank(baseName, currentRank)
-    local maxRank = currentRank
-    local maxSpellID = nil
-    local maxSpellName = nil
-    for rank = currentRank + 1, currentRank + 10 do
-        local name, _, _, _, _, _, spellID = GetSpellInfo(baseName, "Rank " .. rank)
-        if name and GetBaseSpellName(name) == baseName then
-            maxRank = rank
-            maxSpellID = spellID
-            maxSpellName = name
-        else
-            break
+    local ranks = knownSpells[baseName]
+    if not ranks then return nil, nil, nil end
+    for i = #ranks, 1, -1 do
+        local data = ranks[i]
+        if data.rank > currentRank then
+            return data.spellID, data.spellName, data.rank
         end
-    end
-    if maxRank > currentRank then
-        return maxSpellID, maxSpellName, maxRank
     end
     return nil, nil, nil
 end
@@ -170,6 +255,29 @@ local function ShowRankUpUI(outdatedSpells)
 
     local yOffset = -40
     local rankUpButtons = {}
+    local function HideFrameIfAllDisabled()
+        for _, b in ipairs(rankUpButtons) do
+            if b:IsEnabled() then
+                return
+            end
+        end
+        frame:Hide()
+    end
+    local function FormatRank(rankValue, spellID)
+        if rankValue then
+            return tostring(rankValue)
+        end
+        if spellID then
+            local rankText = SRU_GetRank(spellID)
+            if not rankText then
+                return "?"
+            end
+            local numeric = tonumber(rankText)
+            return tostring(numeric or rankText)
+        end
+        return "?"
+    end
+
     for i, data in ipairs(outdatedSpells) do
         local btn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
         btn:SetSize(160, 32)
@@ -179,13 +287,11 @@ local function ShowRankUpUI(outdatedSpells)
         btn:SetHighlightFontObject("GameFontHighlight")
         btn:Enable()
         table.insert(rankUpButtons, btn)
-        -- Get the current spellID from the hotbar slot for correct rank display
-        local actionType, actionID = GetActionInfo(data.slot)
-        local oldRank = actionID and SRU_GetRank(actionID) or "?"
-        local newRank = SRU_GetRank(data.upgradeID)
+        local oldRank = FormatRank(data.currentRank, data.currentSpellID)
+        local newRank = FormatRank(data.upgradeRank, data.upgradeID)
         local infoText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
         infoText:SetPoint("LEFT", btn, "RIGHT", 24, 0)
-    infoText:SetText("Rank " .. oldRank .. " to Rank " .. newRank)
+        infoText:SetText("Rank " .. oldRank .. " to Rank " .. newRank)
         infoText:SetJustifyH("LEFT")
         infoText:SetWidth(200)
         infoText:SetHeight(32)
@@ -196,19 +302,21 @@ local function ShowRankUpUI(outdatedSpells)
             ClearCursor()
             -- print("|cFF00FF00[" .. ADDON_NAME .. "]|r Upgraded slot " .. data.slot .. " to " .. data.newName) -- Disabled to prevent chat spam
             btn:Disable()
-            -- Check if all our tracked buttons are now disabled
-            local allDisabled = true
-            for _, b in ipairs(rankUpButtons) do
-                if b:IsEnabled() then
-                    allDisabled = false
-                    break
-                end
-            end
-            if allDisabled then
-                frame:Hide()
-            end
+            HideFrameIfAllDisabled()
         end)
         btn:Show()
+        local ignoreBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+        ignoreBtn:SetSize(80, 32)
+        ignoreBtn:SetPoint("LEFT", infoText, "RIGHT", 16, 0)
+        ignoreBtn:SetText("Ignore")
+        ignoreBtn:SetScript("OnClick", function()
+            IgnoreUpgrade(data.baseName, data.upgradeRank)
+            btn:Disable()
+            ignoreBtn:Disable()
+            infoText:SetText("Ignoring until Rank " .. tostring((data.upgradeRank or 0) + 1))
+            HideFrameIfAllDisabled()
+        end)
+        ignoreBtn:Show()
         yOffset = yOffset - 40
     end
     frame:SetWidth(520)
@@ -219,33 +327,38 @@ local function ScanAndUpgradeHotbar(shouldShowUI)
     if shouldShowUI == nil then shouldShowUI = true end
     SRU_Debug("Checking hotbar for outdated spell ranks...")
     outdatedSpells = {}
+    local ignoredCount = 0
     for slot = 1, 120 do
-        local actionType, actionID = GetActionInfo(slot)
-        if actionType == "spell" then
-            local spellName = GetSpellInfo(actionID)
-            if spellName then
-                local rankText = GetSpellSubtext(actionID)
-                local currentRank = ExtractRank(rankText)
-                local baseName = GetBaseSpellName(spellName)
-                SRU_Debug("Slot " .. slot .. ": " .. spellName .. " (Rank " .. currentRank .. ", ID: " .. actionID .. ")")
-                -- Try to find the highest known rank using GetSpellInfo(baseName, 'Rank X')
-                local upgradeID, upgradeName, upgradeRank = FindHighestKnownRank(baseName, currentRank)
-                if upgradeID then
-                    SRU_Debug("  -> Higher rank available: " .. upgradeName .. " (Rank " .. upgradeRank .. ", ID: " .. upgradeID .. ")")
+        local spellDetails = GetActionSpellDetails(slot)
+        if spellDetails and spellDetails.baseName then
+            local baseName = spellDetails.baseName
+            local currentRank = spellDetails.currentRank or 1
+            SRU_Debug("Slot " .. slot .. ": " .. tostring(spellDetails.spellName) .. " (Rank " .. currentRank .. ", ID: " .. tostring(spellDetails.spellID) .. ")")
+            local upgradeID, upgradeName, upgradeRank = FindHighestKnownRank(baseName, currentRank)
+            if upgradeID then
+                SRU_Debug("  -> Higher rank available: " .. upgradeName .. " (Rank " .. upgradeRank .. ", ID: " .. upgradeID .. ")")
+                if not IsUpgradeIgnored(baseName, upgradeRank) then
                     table.insert(outdatedSpells, {
                         slot = slot,
                         baseName = baseName,
-                        oldName = spellName,
+                        oldName = spellDetails.spellName,
                         newName = upgradeName,
-                        upgradeID = upgradeID
+                        upgradeID = upgradeID,
+                        upgradeRank = upgradeRank,
+                        currentRank = currentRank,
+                        currentSpellID = spellDetails.spellID
                     })
                 else
-                    SRU_Debug("  -> No upgrade needed (already highest rank or no higher rank found)")
+                    SRU_Debug("  -> Upgrade ignored up to rank " .. tostring(upgradeRank))
+                    ignoredCount = ignoredCount + 1
                 end
+            else
+                SRU_Debug("  -> No upgrade needed (already highest rank or no higher rank found)")
             end
         end
     end
-    if #outdatedSpells > 0 then
+    local upgradeCount = #outdatedSpells
+    if upgradeCount > 0 then
         if shouldShowUI then
             ShowRankUpUI(outdatedSpells)
         end
@@ -253,23 +366,34 @@ local function ScanAndUpgradeHotbar(shouldShowUI)
         if SmuRankUpFrame then SmuRankUpFrame:Hide() end
         if DEBUG then SRU_Debug("No outdated spells found on hotbar.") end
     end
+    return upgradeCount, ignoredCount
 end
 
 -- Main handler
-local function CheckAndUpgradeSpells(shouldShowUI)
+local function CheckAndUpgradeSpells(shouldShowUI, requireNewSpellLearned)
     if shouldShowUI == nil then shouldShowUI = true end
-	ScanSpellBook()
-	ScanAndUpgradeHotbar(shouldShowUI)
+    if not ignoredRanks then EnsureIgnoredRanks() end
+    local newSignature = ScanSpellBook()
+    local hasChanged = (newSignature ~= lastSpellSignature)
+    lastSpellSignature = newSignature
+    if requireNewSpellLearned and not hasChanged then
+        return 0, 0, false
+    end
+    local upgradeCount, ignoredCount = ScanAndUpgradeHotbar(shouldShowUI)
+    return upgradeCount, ignoredCount, hasChanged
 end
 
 -- Event handler
 SmuRankUp:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
+        playerReady = true
+        EnsureIgnoredRanks()
         SRU_Debug("Player logged in. Checking for outdated spells...")
         CheckAndUpgradeSpells(false)
-    elseif event == "LEARNED_SPELL_IN_TAB" then
+    elseif event == "SPELLS_CHANGED" then
+        if not playerReady then return end
         SRU_Debug("Learned new spell. Checking for outdated spells...")
-        CheckAndUpgradeSpells(true)
+        CheckAndUpgradeSpells(true, true)
     end
 end)
 
@@ -290,7 +414,14 @@ local function SmuRankUp_SlashHandler(msg)
         print("  GetSpellSubtext(" .. spellID .. "): " .. tostring(rankText))
     else
         print("|cFF00FF00[" .. ADDON_NAME .. "]|r Checking spells...")
-        CheckAndUpgradeSpells(true)
+        local upgradeCount, ignoredCount = CheckAndUpgradeSpells(true)
+        if upgradeCount and upgradeCount > 0 then
+            print("|cFF00FF00[" .. ADDON_NAME .. "]|r Found " .. upgradeCount .. " outdated spell" .. (upgradeCount == 1 and "" or "s") .. ".")
+        elseif ignoredCount and ignoredCount > 0 then
+            print("|cFF00FF00[" .. ADDON_NAME .. "]|r Only ignored upgrades detected (" .. ignoredCount .. ").")
+        else
+            print("|cFF00FF00[" .. ADDON_NAME .. "]|r No outdated spells found.")
+        end
     end
 end
 

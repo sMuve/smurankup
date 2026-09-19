@@ -1,8 +1,59 @@
 -- SmuRankUp: Automatically upgrade spell ranks on hotbar
--- WoW Classic Anniversary Edition
+-- Supports WoW Classic Anniversary (legacy API) and WoW Forever / Midnight backend (C_Spell / C_SpellBook API)
 
 local ADDON_NAME = "SmuRankUp"
 local DEBUG = false
+
+-- ---------------------------------------------------------------------------
+-- API compatibility layer (legacy globals vs. C_Spell / C_SpellBook)
+-- ---------------------------------------------------------------------------
+local HAS_C_SPELLBOOK = (C_SpellBook and C_SpellBook.GetSpellBookItemInfo) and true or false
+local SPELL_BANK = (Enum and Enum.SpellBookSpellBank and Enum.SpellBookSpellBank.Player) or BOOKTYPE_SPELL or "spell"
+local SPELL_ITEM_TYPE = (Enum and Enum.SpellBookItemType and Enum.SpellBookItemType.Spell) or "SPELL"
+
+-- Returns spell name, spellID
+local function Compat_GetSpellInfo(spell)
+    if C_Spell and C_Spell.GetSpellInfo then
+        local info = C_Spell.GetSpellInfo(spell)
+        if info then return info.name, info.spellID end
+        return nil
+    end
+    local name, _, _, _, _, _, id = GetSpellInfo(spell)
+    return name, id
+end
+
+local function Compat_GetSpellSubtext(spellID)
+    if C_Spell and C_Spell.GetSpellSubtext then return C_Spell.GetSpellSubtext(spellID) end
+    if GetSpellSubtext then return GetSpellSubtext(spellID) end
+    return nil
+end
+
+local function Compat_PickupSpell(spellID)
+    if C_Spell and C_Spell.PickupSpell then return C_Spell.PickupSpell(spellID) end
+    return PickupSpell(spellID)
+end
+
+-- Returns a list of { offset, numSpells } for every spell book tab
+local function Compat_GetSpellTabs()
+    local tabs = {}
+    if C_SpellBook and C_SpellBook.GetNumSpellBookSkillLines then
+        for i = 1, C_SpellBook.GetNumSpellBookSkillLines() do
+            local info = C_SpellBook.GetSpellBookSkillLineInfo(i)
+            if info then
+                table.insert(tabs, { offset = info.itemIndexOffset, numSpells = info.numSpellBookItems })
+            end
+        end
+    else
+        local i = 1
+        while true do
+            local tabName, _, offset, numSpells = GetSpellTabInfo(i)
+            if not tabName then break end
+            table.insert(tabs, { offset = offset, numSpells = numSpells })
+            i = i + 1
+        end
+    end
+    return tabs
+end
 
 -- Get the character's spell book and track learned spells
 local SmuRankUp = CreateFrame("Frame")
@@ -24,11 +75,18 @@ end
 
 local function GetSpellDataFromBookSlot(spellIndex)
     if not spellIndex then return nil end
-    local spellName, subSpellName = GetSpellBookItemName(spellIndex, BOOKTYPE_SPELL)
+    if HAS_C_SPELLBOOK then
+        local spellName, subSpellName = C_SpellBook.GetSpellBookItemName(spellIndex, SPELL_BANK)
+        if not spellName then return nil end
+        local info = C_SpellBook.GetSpellBookItemInfo(spellIndex, SPELL_BANK)
+        if not info or info.itemType ~= SPELL_ITEM_TYPE then return nil end
+        return spellName, subSpellName, info.spellID or info.actionID
+    end
+    local spellName, subSpellName = GetSpellBookItemName(spellIndex, SPELL_BANK)
     if not spellName then return nil end
-    local spellType, fallbackSpellID = GetSpellBookItemInfo(spellIndex, BOOKTYPE_SPELL)
+    local spellType, fallbackSpellID = GetSpellBookItemInfo(spellIndex, SPELL_BANK)
     if spellType ~= "SPELL" then return nil end
-    local spellLink = GetSpellLink(spellIndex, BOOKTYPE_SPELL)
+    local spellLink = GetSpellLink(spellIndex, SPELL_BANK)
     local spellID = ExtractSpellIDFromLink(spellLink) or fallbackSpellID
     return spellName, subSpellName, spellID
 end
@@ -110,15 +168,12 @@ local function GetActionSpellDetails(slot)
         baseName = cached.baseName
         currentRank = cached.rank
     else
-        spellName = select(1, GetSpellInfo(actionID))
+        spellName = Compat_GetSpellInfo(actionID)
         baseName = GetBaseSpellName(spellName)
     end
 
     if not currentRank then
-        local rankText = GetSpellSubtext(actionID)
-        if not rankText then
-            _, rankText = GetSpellInfo(actionID)
-        end
+        local rankText = Compat_GetSpellSubtext(actionID)
         currentRank = ExtractRank(rankText)
     end
 
@@ -134,11 +189,11 @@ end
 
 -- Utility: Extracts rank from subtext or name
 local function SRU_GetRank(spellID)
-    local subtext = GetSpellSubtext(spellID)
+    local subtext = Compat_GetSpellSubtext(spellID)
     if subtext and subtext:find("Rank") then
         return subtext:match("Rank (%d+)") or subtext
     end
-    local name = GetSpellInfo(spellID)
+    local name = Compat_GetSpellInfo(spellID)
     if name then
         local rank = name:match("Rank (%d+)")
         if rank then return rank end
@@ -151,12 +206,9 @@ local function ScanSpellBook()
     SRU_Debug("Scanning spell book...")
     knownSpells = {}
     spellIdToInfo = {}
-    local tabIndex = 1
-    while true do
-        local tabName, _, offset, numSpells = GetSpellTabInfo(tabIndex)
-        if not tabName then break end
-        for i = 1, numSpells do
-            local spellIndex = offset + i
+    for _, tab in ipairs(Compat_GetSpellTabs()) do
+        for i = 1, tab.numSpells do
+            local spellIndex = tab.offset + i
             local spellName, subSpellName, spellID = GetSpellDataFromBookSlot(spellIndex)
             if spellName and spellID then
                 local rank = ExtractRank(subSpellName)
@@ -170,7 +222,6 @@ local function ScanSpellBook()
                 end
             end
         end
-        tabIndex = tabIndex + 1
     end
     -- Sort each spell's ranks by rank ascending
     for baseName, ranks in pairs(knownSpells) do
@@ -210,7 +261,13 @@ local function ShowRankUpUI(outdatedSpells)
         SmuRankUpFrame:SetScript("OnDragStart", SmuRankUpFrame.StartMoving)
         SmuRankUpFrame:SetScript("OnDragStop", SmuRankUpFrame.StopMovingOrSizing)
         -- Add WoW-like border (edge-to-edge)
-        SmuRankUpFrame.border = CreateFrame("Frame", nil, SmuRankUpFrame, "DialogBorderDarkTemplate")
+        local okBorder, border = pcall(CreateFrame, "Frame", nil, SmuRankUpFrame, "DialogBorderDarkTemplate")
+        if not okBorder then
+            -- Template missing on this client: fall back to a plain backdrop border
+            border = CreateFrame("Frame", nil, SmuRankUpFrame, "BackdropTemplate")
+            border:SetBackdrop({ edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", edgeSize = 16 })
+        end
+        SmuRankUpFrame.border = border
         SmuRankUpFrame.border:SetPoint("TOPLEFT", SmuRankUpFrame, "TOPLEFT", 0, 0)
         SmuRankUpFrame.border:SetPoint("BOTTOMRIGHT", SmuRankUpFrame, "BOTTOMRIGHT", 0, 0)
         -- Add black background inside border
@@ -297,7 +354,7 @@ local function ShowRankUpUI(outdatedSpells)
         infoText:SetHeight(32)
         infoText:Show()
         btn:SetScript("OnClick", function()
-            PickupSpell(data.upgradeID)
+            Compat_PickupSpell(data.upgradeID)
             PlaceAction(data.slot)
             ClearCursor()
             -- print("|cFF00FF00[" .. ADDON_NAME .. "]|r Upgraded slot " .. data.slot .. " to " .. data.newName) -- Disabled to prevent chat spam
@@ -383,11 +440,25 @@ local function CheckAndUpgradeSpells(shouldShowUI, requireNewSpellLearned)
     return upgradeCount, ignoredCount, hasChanged
 end
 
+StaticPopupDialogs["SMURANKUP_FOREVER_NOTICE"] = {
+    text = "|cFF00FF00SmuRankUp|r\n\nSaving variables is currently not working in WoW Forever, so \"Ignore\" for spell rank ups does not persist.\n\nBlizzard is aware of the issue and working on it.",
+    button1 = OKAY or "OK",
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
 -- Event handler
 SmuRankUp:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         playerReady = true
         EnsureIgnoredRanks()
+        if HAS_C_SPELLBOOK then
+            -- WoW Forever only: SavedVariables are currently broken
+            local function ShowNotice() StaticPopup_Show("SMURANKUP_FOREVER_NOTICE") end
+            if C_Timer and C_Timer.After then C_Timer.After(3, ShowNotice) else ShowNotice() end
+        end
         SRU_Debug("Player logged in. Checking for outdated spells...")
         CheckAndUpgradeSpells(false)
     elseif event == "SPELLS_CHANGED" then
@@ -408,10 +479,11 @@ local function SmuRankUp_SlashHandler(msg)
         print("|cFF00FF00[" .. ADDON_NAME .. "]|r Debug mode: " .. (DEBUG and "|cFF00FF00ON|r" or "|cFFFF0000OFF|r"))
     elseif msg == "test" then
         print("|cFF00FF00[" .. ADDON_NAME .. "]|r Testing GetSpellInfo and GetSpellSubtext...")
-        local name, rank, icon, castTime, minRange, maxRange, spellID = GetSpellInfo("Lesser Heal")
+        local name, spellID = Compat_GetSpellInfo("Lesser Heal")
         print("  GetSpellInfo('Lesser Heal'): ID=" .. tostring(spellID) .. ", Name=" .. tostring(name))
-        local rankText = GetSpellSubtext(spellID)
-        print("  GetSpellSubtext(" .. spellID .. "): " .. tostring(rankText))
+        local rankText = spellID and Compat_GetSpellSubtext(spellID)
+        print("  GetSpellSubtext(" .. tostring(spellID) .. "): " .. tostring(rankText))
+        print("  API: " .. (HAS_C_SPELLBOOK and "C_SpellBook" or "legacy"))
     else
         print("|cFF00FF00[" .. ADDON_NAME .. "]|r Checking spells...")
         local upgradeCount, ignoredCount = CheckAndUpgradeSpells(true)

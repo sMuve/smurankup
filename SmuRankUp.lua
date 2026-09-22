@@ -127,10 +127,9 @@ end
 
 -- Debug output
 local function SRU_Debug(message)
-    -- Debug output disabled to prevent chat spam
-    -- if DEBUG then
-    --     print("|cFF00FF00[" .. ADDON_NAME .. "]|r " .. tostring(message))
-    -- end
+    if DEBUG then
+        print("|cFF00FF00[" .. ADDON_NAME .. "]|r " .. tostring(message))
+    end
 end
 
 -- Helper function to count table entries
@@ -380,12 +379,18 @@ local function ShowRankUpUI(outdatedSpells)
     frame:SetHeight(math.abs(yOffset) + 60)
 end
 
+-- Slots 1-120 cover the classic 6 action bars (main + 5 bonus/multibars).
+-- WoW Forever/Midnight added bars 6-8, which use slots up to 180.
+-- Scanning the extra slots is a no-op on clients that don't have them
+-- (GetActionInfo returns nothing for unused slots), so one bound works everywhere.
+local MAX_ACTION_SLOT = 180
+
 local function ScanAndUpgradeHotbar(shouldShowUI)
     if shouldShowUI == nil then shouldShowUI = true end
     SRU_Debug("Checking hotbar for outdated spell ranks...")
     outdatedSpells = {}
     local ignoredCount = 0
-    for slot = 1, 120 do
+    for slot = 1, MAX_ACTION_SLOT do
         local spellDetails = GetActionSpellDetails(slot)
         if spellDetails and spellDetails.baseName then
             local baseName = spellDetails.baseName
@@ -477,6 +482,26 @@ local function SmuRankUp_SlashHandler(msg)
     if msg == "debug" then
         DEBUG = not DEBUG
         print("|cFF00FF00[" .. ADDON_NAME .. "]|r Debug mode: " .. (DEBUG and "|cFF00FF00ON|r" or "|cFFFF0000OFF|r"))
+    elseif msg == "slots" then
+        -- Diagnostic: dump every occupied action slot so we can see the real
+        -- slot numbers WoW Forever assigns to action bars 6-8.
+        print("|cFF00FF00[" .. ADDON_NAME .. "]|r Scanning slots 1-300 for occupied actions...")
+        local found = 0
+        for slot = 1, 300 do
+            local actionType, actionID = GetActionInfo(slot)
+            if actionType then
+                found = found + 1
+                local label
+                if actionType == "spell" then
+                    local spellName = Compat_GetSpellInfo(actionID)
+                    label = tostring(spellName) .. " (spellID " .. tostring(actionID) .. ")"
+                else
+                    label = actionType .. " " .. tostring(actionID)
+                end
+                print("  slot " .. slot .. ": " .. label)
+            end
+        end
+        print("|cFF00FF00[" .. ADDON_NAME .. "]|r " .. found .. " occupied slot(s) found.")
     elseif msg == "test" then
         print("|cFF00FF00[" .. ADDON_NAME .. "]|r Testing GetSpellInfo and GetSpellSubtext...")
         local name, spellID = Compat_GetSpellInfo("Lesser Heal")

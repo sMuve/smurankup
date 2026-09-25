@@ -445,25 +445,11 @@ local function CheckAndUpgradeSpells(shouldShowUI, requireNewSpellLearned)
     return upgradeCount, ignoredCount, hasChanged
 end
 
-StaticPopupDialogs["SMURANKUP_FOREVER_NOTICE"] = {
-    text = "|cFF00FF00SmuRankUp|r\n\nSaving variables is currently not working in WoW Forever, so \"Ignore\" for spell rank ups does not persist.\n\nBlizzard is aware of the issue and working on it.",
-    button1 = OKAY or "OK",
-    timeout = 0,
-    whileDead = true,
-    hideOnEscape = true,
-    preferredIndex = 3,
-}
-
 -- Event handler
 SmuRankUp:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         playerReady = true
         EnsureIgnoredRanks()
-        if HAS_C_SPELLBOOK then
-            -- WoW Forever only: SavedVariables are currently broken
-            local function ShowNotice() StaticPopup_Show("SMURANKUP_FOREVER_NOTICE") end
-            if C_Timer and C_Timer.After then C_Timer.After(3, ShowNotice) else ShowNotice() end
-        end
         SRU_Debug("Player logged in. Checking for outdated spells...")
         CheckAndUpgradeSpells(false)
     elseif event == "SPELLS_CHANGED" then

@@ -385,13 +385,19 @@ end
 -- (GetActionInfo returns nothing for unused slots), so one bound works everywhere.
 local MAX_ACTION_SLOT = 180
 
+-- Slots 121-132 belong to the possess/vehicle/override bar and 133-144 to the
+-- shaman totem (multicast) bar. Those aren't regular hotbars, so skip them.
+local function IsSkippedActionSlot(slot)
+    return slot >= 121 and slot <= 144
+end
+
 local function ScanAndUpgradeHotbar(shouldShowUI)
     if shouldShowUI == nil then shouldShowUI = true end
     SRU_Debug("Checking hotbar for outdated spell ranks...")
     outdatedSpells = {}
     local ignoredCount = 0
     for slot = 1, MAX_ACTION_SLOT do
-        local spellDetails = GetActionSpellDetails(slot)
+        local spellDetails = not IsSkippedActionSlot(slot) and GetActionSpellDetails(slot)
         if spellDetails and spellDetails.baseName then
             local baseName = spellDetails.baseName
             local currentRank = spellDetails.currentRank or 1

@@ -31,9 +31,14 @@ Wenn der Nutzer sagt, dass er bereit für einen Release ist (z. B. "ready für e
    `project-version` übernommen. Beide `.toc`-Varianten (Camelot + TBC) landen in einem
    gemeinsamen Zip.
 
-6. **Push bestätigen lassen**: Frag nach, bevor du Commit und Tag nach GitHub pushst
-   (`git push && git push --tags`). Das löst automatisch den CurseForge-Upload über die GitHub
-   Action aus (Trigger: nur Tags, keine normalen Pushes auf `main`).
+6. **Vor jedem Push - Pflicht-Checkliste**: Push niemals, ohne das vorher zu prüfen:
+   - Ist die Version in **beiden** `.toc`-Dateien (`SmuRankUp_Camelot.toc` und `SmuRankUp_TBC.toc`)
+     seit dem letzten Tag tatsächlich erhöht worden, und sind beide identisch? Falls nicht, zuerst
+     nachholen (Schritt 2) - nie mit unveränderter oder abweichender Version pushen.
+   - Zeig dem Nutzer den neuen `CHANGELOG.md`-Abschnitt und warte auf seine ausdrückliche
+     Bestätigung (Review), bevor du weitermachst.
+   - Erst danach: `git push && git push --tags`. Das löst automatisch den CurseForge-Upload über
+     die GitHub Action aus (Trigger: nur Tags, keine normalen Pushes auf `main`).
 
 Die `.pkgmeta` nutzt `manual-changelog`, d. h. der Packager lädt exakt den Inhalt von
 `CHANGELOG.md` zu CurseForge hoch statt automatisch aus dem Git-Log zu generieren - Schritt 3 ist

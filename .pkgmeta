@@ -1,0 +1,4 @@
+package-as: SmuRankUp
+
+ignore:
+  - README.md
